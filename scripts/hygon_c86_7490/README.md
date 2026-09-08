@@ -48,7 +48,11 @@ BackendBound、BadSpec 和 spec 分类都是 `Hygon Zen1 proxy`，不能与
 Topdown 或 spec 分类的原始汇总超过 105% 时显示“无效”，不强制归一化。
 STLB 仅表示 D-side STLB。C86-7490 上的 0x84、0x85、0x94、0x99 在
 受控测试中不响应，ITLB 两行明确显示“未支持”。`CPU利用率` 使用独立
-time 轮次中当前线程 CPU 时间除以墙钟时间，脚本不裁剪实测结果。
+time 轮次中当前线程 CPU 时间除以墙钟时间，脚本不裁剪实测结果。汇总模板新增的
+Fetch Latency/Bandwidth、iCache/iTLB等待和flush细分没有Hygon等价事件，显示
+“未采集”。新增的BadSpec分支类型、Machine Clear/Nuke以及Backend
+Core/Memory的L1/L2/L3分层同样没有已确认的Hygon等价口径，继续显示
+“未采集”，不用proxy数值填充。
 
 容器内先安装一次报表依赖：
 

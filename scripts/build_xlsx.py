@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -6,10 +8,10 @@ import argparse
 import csv
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import regex as re
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import Cell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -29,6 +31,8 @@ STAGE_SHEETS = (
     ("sample", ("sample",)),
     ("output", ("async_output_init", "postprocess_sampled")),
 )
+END_TO_END_STAGE = "execute_model_to_sample_tokens"
+END_TO_END_SHEET = "execute_to_sample"
 BASE_HEADERS = (
     "函数",
     "序号",
@@ -49,8 +53,36 @@ SUMMARY_METRICS = (
     "IPC",
     "Retire",
     "FrontendBound",
-    "BackendBound",
+    "Fetch Latency Bound",
+    "Idle by iTLB Miss",
+    "Idle by iCache Miss",
+    "Flush",
+    "Branch Flush",
+    "OoO Flush",
+    "SP Flush",
+    "Fetch Bandwidth Bound",
     "BadSpec",
+    "Branch Mispredicts",
+    "Indirect Branch",
+    "Push Branch",
+    "Pop Branch",
+    "Other Branch",
+    "Machine Clears",
+    "Nuke Flush",
+    "Other Flush",
+    "BackendBound",
+    "Core Bound",
+    "Resource Bound",
+    "FDIV Stall",
+    "DIV Stall",
+    "FSU Stall",
+    "Exe Ports Util",
+    "Memory Bound",
+    "L1 Bound",
+    "L2 Bound",
+    "L3 Bound",
+    "Mem Bound",
+    "Store Bound",
     "dp_spec",
     "ld_spec",
     "st_spec",
@@ -75,15 +107,75 @@ SUMMARY_METRICS = (
     "stlb missrate",
     "stlb mpki",
 )
+SUMMARY_LEVELS = {
+    "cycle占比": 2,
+    "Retire": 1,
+    "FrontendBound": 1,
+    "Fetch Latency Bound": 2,
+    "Idle by iTLB Miss": 3,
+    "Idle by iCache Miss": 3,
+    "Flush": 3,
+    "Branch Flush": 4,
+    "OoO Flush": 4,
+    "SP Flush": 4,
+    "Fetch Bandwidth Bound": 2,
+    "BadSpec": 1,
+    "Branch Mispredicts": 2,
+    "Indirect Branch": 3,
+    "Push Branch": 3,
+    "Pop Branch": 3,
+    "Other Branch": 3,
+    "Machine Clears": 2,
+    "Nuke Flush": 3,
+    "Other Flush": 3,
+    "BackendBound": 1,
+    "Core Bound": 2,
+    "Resource Bound": 3,
+    "FDIV Stall": 3,
+    "DIV Stall": 3,
+    "FSU Stall": 3,
+    "Exe Ports Util": 3,
+    "Memory Bound": 2,
+    "L1 Bound": 3,
+    "L2 Bound": 3,
+    "L3 Bound": 3,
+    "Mem Bound": 3,
+    "Store Bound": 3,
+}
+SUMMARY_GROUP_STARTS = {
+    "CPU利用率",
+    "Retire",
+    "dp_spec",
+    "br missrate",
+    "l1i missrate",
+    "l2i missrate",
+    "l1d missrate",
+    "L2d missrate",
+    "L3 missrate",
+    "itlb missrate",
+    "dtlb missrate",
+    "stlb missrate",
+}
 FORMULA_TOKEN = re.compile(r"\{([^{}]+)\}")
 SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 NUMBER = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+BENCHMARK_VALUE = re.compile(
+    r"^\s*(?P<label>.+?):\s*"
+    r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*$"
+)
 
 HEADER_FILL = "FF1F4E78"
 HEADER_BORDER_COLOR = "FFB4C6E7"
 BODY_BORDER_COLOR = "FFD9E2F3"
 SUMMARY_LABEL_FILL = "FFD9EAF7"
 SUMMARY_LABEL_FONT = "FF17365D"
+SUMMARY_LEVEL_FILLS = {
+    1: "FFD9EAF7",
+    2: "FFEDF4FA",
+    3: "FFF5F9FC",
+    4: "FFFAFCFE",
+}
 WHITE = "FFFFFFFF"
 BLACK = "FF000000"
 
@@ -97,6 +189,12 @@ BODY_BORDER = Border(
     left=Side(style="thin", color=BODY_BORDER_COLOR),
     right=Side(style="thin", color=BODY_BORDER_COLOR),
     top=Side(style="thin", color=BODY_BORDER_COLOR),
+    bottom=Side(style="thin", color=BODY_BORDER_COLOR),
+)
+SUMMARY_SECTION_BORDER = Border(
+    left=Side(style="thin", color=BODY_BORDER_COLOR),
+    right=Side(style="thin", color=BODY_BORDER_COLOR),
+    top=Side(style="medium", color=HEADER_BORDER_COLOR),
     bottom=Side(style="thin", color=BODY_BORDER_COLOR),
 )
 
@@ -141,6 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-short", default="qwen3")
     parser.add_argument("--input-len", type=int, default=7000)
     parser.add_argument("--output-len", type=int, default=100)
+    parser.add_argument("--include-end-to-end", action="store_true")
     return parser.parse_args()
 
 
@@ -451,38 +550,152 @@ def summary_value(value: str) -> tuple[object, str]:
     return stripped, "General"
 
 
+def read_time_benchmark(run_root: Path) -> list[tuple[str, str]]:
+    path = run_root / "time" / "benchmark.log"
+    if not path.is_file():
+        return []
+
+    started = False
+    rows: list[tuple[str, str]] = []
+    for raw_line in path.read_text(errors="replace").splitlines():
+        line = ANSI_ESCAPE.sub("", raw_line)
+        if "Serving Benchmark Result" in line:
+            started = True
+            continue
+        if started and line.strip() == "=" * 50:
+            break
+        if not started:
+            continue
+        match = BENCHMARK_VALUE.fullmatch(line)
+        if match:
+            rows.append((match.group("label").strip(), match.group("value")))
+
+    if not started or not rows:
+        raise ValueError(f"{path}: benchmark result section was not parsed")
+    return rows
+
+
+def benchmark_value(value: str) -> tuple[int | float, str]:
+    if re.fullmatch(r"[-+]?\d+", value):
+        return int(value), "0"
+    return float(value), "0.00"
+
+
+def summary_display_label(metric: str) -> str:
+    level = SUMMARY_LEVELS.get(metric)
+    if metric == "cycle占比" or level is None or level == 1:
+        return metric
+    return f"{'--' * (level - 1)} {metric}"
+
+
+def style_summary_row(cell: Cell, metric: str, column_index: int) -> None:
+    if not metric:
+        cell.font = Font(name="Carlito", size=11)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        return
+
+    level = SUMMARY_LEVELS.get(metric)
+    group_start = metric in SUMMARY_GROUP_STARTS
+    cell.border = SUMMARY_SECTION_BORDER if group_start else BODY_BORDER
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    if level is not None:
+        if level <= 2 or column_index == 1:
+            cell.fill = PatternFill("solid", fgColor=SUMMARY_LEVEL_FILLS[level])
+        if column_index == 1:
+            cell.font = Font(
+                name="Carlito",
+                size=11,
+                bold=level <= 2,
+                color=SUMMARY_LABEL_FONT,
+            )
+            cell.alignment = Alignment(
+                horizontal="left",
+                vertical="center",
+                indent=level - 1,
+            )
+        else:
+            cell.font = Font(name="Carlito", size=11, bold=level == 1)
+        return
+
+    if column_index == 1:
+        cell.font = Font(
+            name="Carlito",
+            size=11,
+            bold=True,
+            color=SUMMARY_LABEL_FONT,
+        )
+        cell.fill = PatternFill("solid", fgColor=SUMMARY_LABEL_FILL)
+    else:
+        cell.font = Font(name="Carlito", size=11)
+
+
 def write_summary(worksheet: Worksheet, run_root: Path) -> None:
     rows = normalize_summary_rows(read_matrix(run_root / "summary.csv"))
+    benchmark_rows = read_time_benchmark(run_root)
     width = len(rows[0])
     for row_index, row in enumerate(rows, 1):
         for column_index, raw_value in enumerate(row, 1):
             value, number_format = summary_value(raw_value)
+            if row_index > 1 and column_index == 1:
+                value = summary_display_label(row[0]) or None
             cell = worksheet.cell(row_index, column_index, value)
             cell.alignment = Alignment(horizontal="center", vertical="center")
             if row_index == 1:
                 cell.font = Font(name="Carlito", size=11, bold=True, color=WHITE)
                 cell.fill = PatternFill("solid", fgColor=HEADER_FILL)
                 cell.border = HEADER_BORDER
-            elif column_index == 1:
-                cell.font = Font(
-                    name="Carlito",
-                    size=11,
-                    bold=True,
-                    color=SUMMARY_LABEL_FONT,
-                )
-                cell.fill = PatternFill("solid", fgColor=SUMMARY_LABEL_FILL)
-                cell.border = HEADER_BORDER
             else:
-                cell.font = Font(name="Carlito", size=11)
-                cell.border = BODY_BORDER
+                style_summary_row(cell, row[0], column_index)
                 cell.number_format = number_format
+        if row_index > 1:
+            worksheet.row_dimensions[row_index].height = 21
+
+    benchmark_header_row = len(rows) + 2
+    for column_index, value in enumerate(("time轮Benchmark", "数值"), 1):
+        cell = worksheet.cell(benchmark_header_row, column_index, value)
+        cell.font = Font(name="Carlito", size=11, bold=True, color=WHITE)
+        cell.fill = PatternFill("solid", fgColor=HEADER_FILL)
+        cell.border = HEADER_BORDER
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[benchmark_header_row].height = 24
+
+    display_rows = benchmark_rows or [("状态", "未采集")]
+    for offset, (label, raw_value) in enumerate(display_rows, 1):
+        row_index = benchmark_header_row + offset
+        label_cell = worksheet.cell(row_index, 1, label)
+        label_cell.font = Font(
+            name="Carlito",
+            size=11,
+            bold=True,
+            color=SUMMARY_LABEL_FONT,
+        )
+        label_cell.fill = PatternFill("solid", fgColor=SUMMARY_LABEL_FILL)
+        label_cell.border = HEADER_BORDER
+        label_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        if benchmark_rows:
+            value, number_format = benchmark_value(raw_value)
+        else:
+            value, number_format = raw_value, "General"
+        value_cell = worksheet.cell(row_index, 2, value)
+        value_cell.font = Font(name="Carlito", size=11)
+        value_cell.border = BODY_BORDER
+        value_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.number_format = number_format
 
     worksheet.row_dimensions[1].height = 24
-    max_label = max(len(str(row[0])) for row in rows if row)
+    benchmark_labels = [label for label, _value in display_rows]
+    max_label = max(
+        *(len(summary_display_label(str(row[0]))) for row in rows if row),
+        *(len(label) for label in benchmark_labels),
+        len("time轮Benchmark"),
+    )
     worksheet.column_dimensions["A"].width = max(23, min(36, max_label + 2))
     stage_widths = {
         "prepare_attn_model_state": 24,
         "postprocess_sampled": 20,
+        END_TO_END_STAGE: 31,
     }
     for column_index in range(2, width + 1):
         header = str(rows[0][column_index - 1])
@@ -540,18 +753,26 @@ def output_path(args: argparse.Namespace) -> Path:
     )
 
 
-def expected_sheet_names(groups: tuple[GroupSpec, ...]) -> list[str]:
-    return [
-        "汇总",
-        "热点函数",
-        *(f"{stem} {group.suffix}" for group in groups for stem, _ in STAGE_SHEETS),
-    ]
+def expected_sheet_names(
+    groups: tuple[GroupSpec, ...],
+    include_end_to_end: bool = False,
+) -> list[str]:
+    names = ["汇总", "热点函数"]
+    for group in groups:
+        names.extend(f"{stem} {group.suffix}" for stem, _ in STAGE_SHEETS)
+        if include_end_to_end:
+            names.append(f"{END_TO_END_SHEET} {group.suffix}")
+    return names
 
 
-def validate_saved_workbook(path: Path, groups: tuple[GroupSpec, ...]) -> None:
+def validate_saved_workbook(
+    path: Path,
+    groups: tuple[GroupSpec, ...],
+    include_end_to_end: bool = False,
+) -> None:
     workbook = load_workbook(path, read_only=False, data_only=False)
     try:
-        expected = expected_sheet_names(groups)
+        expected = expected_sheet_names(groups, include_end_to_end)
         if workbook.sheetnames != expected:
             raise ValueError(f"unexpected worksheet order in {path}")
         for worksheet in workbook.worksheets:
@@ -559,11 +780,18 @@ def validate_saved_workbook(path: Path, groups: tuple[GroupSpec, ...]) -> None:
                 raise ValueError(f"{path}: {worksheet.title} freeze pane is not B2")
         if workbook["热点函数"].max_row < 2:
             raise ValueError(f"{path}: hotspot report is empty")
+        summary_labels = {
+            workbook["汇总"].cell(row, 1).value
+            for row in range(1, workbook["汇总"].max_row + 1)
+        }
+        if "time轮Benchmark" not in summary_labels:
+            raise ValueError(f"{path}: time benchmark section is missing")
     finally:
         workbook.close()
 
 
 def build_workbook(args: argparse.Namespace, groups: tuple[GroupSpec, ...]) -> Path:
+    include_end_to_end = getattr(args, "include_end_to_end", False)
     workbook = Workbook()
     workbook.remove(workbook.active)
     summary = workbook.create_sheet("汇总")
@@ -585,6 +813,16 @@ def build_workbook(args: argparse.Namespace, groups: tuple[GroupSpec, ...]) -> P
                     start_row,
                 )
             size_detail_sheet(worksheet, last_column)
+        if include_end_to_end:
+            worksheet = workbook.create_sheet(f"{END_TO_END_SHEET} {group.suffix}")
+            write_detail_section(
+                worksheet,
+                args.run_root / "end_to_end",
+                group,
+                END_TO_END_STAGE,
+                1,
+            )
+            size_detail_sheet(worksheet, last_column)
 
     workbook.active = 0
     workbook.calculation.calcMode = "auto"
@@ -593,7 +831,7 @@ def build_workbook(args: argparse.Namespace, groups: tuple[GroupSpec, ...]) -> P
     output = output_path(args)
     workbook.save(output)
     workbook.close()
-    validate_saved_workbook(output, groups)
+    validate_saved_workbook(output, groups, include_end_to_end)
     return output
 
 

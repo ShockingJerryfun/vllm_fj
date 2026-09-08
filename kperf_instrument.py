@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from __future__ import annotations
 
 import ctypes
@@ -68,6 +71,8 @@ MODE = os.getenv("KPERF_MODE", "pmu")
 SCOPE = os.getenv("KPERF_SCOPE", "thread")
 PMU_NAME = os.getenv("KPERF_PMU_NAME", "")
 ENABLED = os.getenv("KPERF_ENABLE") == "1"
+TARGET_STAGE = os.getenv("KPERF_TARGET", "")
+QUALIFIER_STAGE = os.getenv("KPERF_QUALIFIER", "")
 COUNTER_GROUPS: list[tuple[list[int], list[int]]] = []
 WALL_START_NS = 0
 THREAD_START_NS = 0
@@ -76,6 +81,7 @@ THREAD_OVERHEAD_NS = 0
 CALL = 0
 NAME = ""
 ACTIVE = False
+QUALIFIED = False
 
 
 def emit(message: str) -> None:
@@ -256,9 +262,14 @@ def init() -> None:
 
 
 def kperf_begin(name: str) -> None:
-    global ACTIVE, CALL, NAME, THREAD_START_NS, WALL_START_NS
+    global ACTIVE, CALL, NAME, QUALIFIED, THREAD_START_NS, WALL_START_NS
     if not ENABLED:
         return
+    if TARGET_STAGE and name != TARGET_STAGE:
+        if ACTIVE and name == QUALIFIER_STAGE:
+            QUALIFIED = True
+        return
+    QUALIFIED = False
     if MODE == "time":
         CALL += 1
         NAME = name
@@ -307,7 +318,9 @@ def read_group(fds: list[int], ids: list[int]) -> tuple[int, int, list[int]]:
 
 
 def kperf_finish(name: str) -> None:
-    global ACTIVE
+    global ACTIVE, QUALIFIED
+    if TARGET_STAGE and name != TARGET_STAGE:
+        return
     if not ACTIVE:
         return
     if MODE == "time":
@@ -332,9 +345,13 @@ def kperf_finish(name: str) -> None:
                 )
             )
         )
+        if QUALIFIED:
+            emit(f"KPERF_QUALIFIER,{NAME},{CALL},{QUALIFIER_STAGE}")
+        QUALIFIED = False
         return
     if not COUNTER_GROUPS:
         ACTIVE = False
+        QUALIFIED = False
         return
     disable_error: OSError | None = None
     for fds, _ in COUNTER_GROUPS:
@@ -374,6 +391,19 @@ def kperf_finish(name: str) -> None:
         *(str(count) for count in counts),
     ]
     emit(",".join(fields))
+    if QUALIFIED:
+        emit(f"KPERF_QUALIFIER,{NAME},{CALL},{QUALIFIER_STAGE}")
+    QUALIFIED = False
+
+
+def kperf_span_begin(name: str) -> None:
+    if name == TARGET_STAGE:
+        kperf_begin(name)
+
+
+def kperf_span_finish(name: str) -> None:
+    if name == TARGET_STAGE:
+        kperf_finish(name)
 
 
 init()

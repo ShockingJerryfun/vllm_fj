@@ -62,6 +62,8 @@ record_command "runtime identity" "$RUN_ROOT/runtime.txt" 0 0 \
 "${RUNTIME_COMMAND[@]}" > "$RUN_ROOT/runtime.txt"
 
 EXPECTED_CALLS=$(( RANDOM_OUTPUT_LEN - 1 ))
+END_TO_END_STAGE=execute_model_to_sample_tokens
+END_TO_END_ROOT="$RUN_ROOT/end_to_end"
 
 RUN_ROOT="$RUN_ROOT" "$COMMON_DIR/run_one.sh" time
 PARSE_COMMAND=(
@@ -83,6 +85,51 @@ while IFS='|' read -r label codes; do
     "${PARSE_COMMAND[@]}"
 done <<EOF
 topdown|$EVENTS_920B_TOPDOWN
+flush|$EVENTS_920B_FLUSH
+badspec_branch|$EVENTS_920B_BADSPEC_BRANCH
+backend_core|$EVENTS_920B_BACKEND_CORE
+backend_memory|$EVENTS_920B_BACKEND_MEMORY
+icache|$EVENTS_920B_ICACHE
+dcache|$EVENTS_920B_DCACHE
+l3|$EVENTS_920B_L3
+tlb1|$EVENTS_920B_TLB1
+tlb2|$EVENTS_920B_TLB2
+branch|$EVENTS_920B_BRANCH
+imix|$EVENTS_920B_IMIX
+imix2|$EVENTS_920B_IMIX2
+EOF
+
+install -d -m 755 "$END_TO_END_ROOT"
+: > "$END_TO_END_ROOT/commands.txt"
+KPERF_TARGET="$END_TO_END_STAGE" KPERF_QUALIFIER=run_fullgraph \
+    RUN_ROOT="$END_TO_END_ROOT" "$COMMON_DIR/run_one.sh" time
+PARSE_COMMAND=(
+    "$PYTHON_BIN" "$COMMON_DIR/parse_run.py" "$END_TO_END_ROOT/time"
+    --mode time
+    --profile end_to_end
+    --expected-calls "$EXPECTED_CALLS"
+)
+record_command "end-to-end time parse" "" 0 0 "${PARSE_COMMAND[@]}"
+"${PARSE_COMMAND[@]}"
+
+while IFS='|' read -r label codes; do
+    KPERF_TARGET="$END_TO_END_STAGE" KPERF_QUALIFIER=run_fullgraph \
+        RUN_ROOT="$END_TO_END_ROOT" \
+        "$COMMON_DIR/run_one.sh" "$label" "$codes" "$codes"
+    PARSE_COMMAND=(
+        "$PYTHON_BIN" "$COMMON_DIR/parse_run.py" "$END_TO_END_ROOT/$label"
+        --event-names "$codes"
+        --profile end_to_end
+        --expected-calls "$EXPECTED_CALLS"
+    )
+    record_command "end-to-end $label parse" "" 0 0 "${PARSE_COMMAND[@]}"
+    "${PARSE_COMMAND[@]}"
+done <<EOF
+topdown|$EVENTS_920B_TOPDOWN
+flush|$EVENTS_920B_FLUSH
+badspec_branch|$EVENTS_920B_BADSPEC_BRANCH
+backend_core|$EVENTS_920B_BACKEND_CORE
+backend_memory|$EVENTS_920B_BACKEND_MEMORY
 icache|$EVENTS_920B_ICACHE
 dcache|$EVENTS_920B_DCACHE
 l3|$EVENTS_920B_L3
@@ -106,6 +153,7 @@ BUILD_COMMAND=(
     --model-short "$MODEL_SHORT"
     --input-len "$RANDOM_INPUT_LEN"
     --output-len "$RANDOM_OUTPUT_LEN"
+    --include-end-to-end
 )
 record_command "Excel report" "" 0 0 "${BUILD_COMMAND[@]}"
 "${BUILD_COMMAND[@]}"

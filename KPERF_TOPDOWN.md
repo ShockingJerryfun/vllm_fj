@@ -1,4 +1,4 @@
-# vLLM 0.26.0 默认V2 Decode八阶段PMU采集
+# vLLM 0.26.0 默认V2 Decode八阶段与端到端PMU采集
 
 本分支只对真实decode路径中的八个串行函数做CPU PMU打点。探针在函数外层
 调用 `kperf_begin()`，并在 `finally` 中调用 `kperf_finish()`；原函数主体放在
@@ -17,6 +17,13 @@
 | 7 | `async_output_init` | `AsyncOutput.__init__()` | 创建异步输出并发起结果回传 |
 | 8 | `postprocess_sampled` | `GPUModelRunner.postprocess_sampled()` | 更新请求状态并整理采样结果 |
 
+920B和950额外采集 `execute_model_to_sample_tokens`，起点是Worker
+`execute_model()` 进入，终点是 `sample_tokens()` 返回。它覆盖八阶段及区间之间
+未单独打点的同一EngineCore/Worker执行线程代码，也包括两次Worker
+调用之间的调度代码，但不包含异步输出线程随后等待D2H完成的部分。
+由于当前计数器状态不支持嵌套，端到端通过 `KPERF_TARGET` 独立运行
+time和13个PMU事件组；内部八阶段探针在这些轮次中为no-op。
+
 本次采集配置以 `run_fullgraph` 为八阶段调用对齐锚点，只适用于走完整Graph的
 decode轮次；eager和piecewise路径不属于这套八阶段统计口径。所有原始调用仍写入
 明细页，第一轮prefill和未对齐调用不会进入汇总值。
@@ -32,6 +39,28 @@ CPU时间；PMU轮次只做事件组reset、enable、disable和read，不再混�
 decode样本的 `sum(thread CPU time) / sum(wall time)` 计算。它表示被打点线程在
 该墙钟区间内的CPU占用比例，不是进程全部线程或整机利用率；脚本不裁剪或归一化
 实测结果。
+
+## 920B与950 Topdown L2/L3口径
+
+920B的Topdown宽度为6，950（HIP12）为8。两者共用以下Backend事件：
+`0x7001` execution stall、`0x7005` any-load stall、`0x7006` store stall、
+`0x7007` L1 miss stall、`0x7008` L2 miss stall、`0x7009` L3 miss stall。
+汇总比率均先对同一轮的分子和分母分别求和，再做除法。
+
+- `Retire = retired / (width * cycles)`，`BadSpec = (spec-retired) / (width*cycles)`。
+- `Branch Mispredicts = BadSpec * branch_mispredict / (branch_mispredict + ROB flush)`，
+  `Machine Clears = BadSpec - Branch Mispredicts`。
+- `Core Bound = execution stall / cycles - Memory Bound`。
+- `Memory Bound = (any-load stall + store stall) / cycles`。
+- `L1/L2/L3 Bound` 依次为 `(0x7005-0x7007)`、`(0x7007-0x7008)`、
+  `(0x7008-0x7009)` 除以cycles；`Mem Bound=0x7009/cycles`，
+  `Store Bound=0x7006/cycles`。
+- 920B的 `Nuke Flush=0x200f/0x2010`；950为 `0x203f/0x2040`。
+- 950额外计算 `Resource Bound=0x7000/cycles`；920B没有对齐事件，显示
+  `未采集`。
+
+因Core Bound与Memory Bound位于不同PMU组，跨组差值是各自重复轮次
+归一化后的比率相减；脚本不对跨轮差值做裁剪或强制归一化。
 
 ## 脚本结构
 
@@ -75,20 +104,28 @@ bash /home/fj/vllm_topdown/scripts/run_topdown.sh
 ## Excel内容
 
 - 第一个sheet固定为 `汇总`，只汇总对齐的decode调用。920B、950和Hygon使用
-  完全相同的指标行及顺序；芯片没有采集的等价事件显示 `未采集`，
-  已确认事件不响应的指标显示 `未支持`。
+  完全相同的指标行及顺序；920B和950的端到端列放在八阶段之前。
+  芯片没有采集的等价事件显示
+  `未采集`，已确认事件不响应的指标显示 `未支持`。
 - `cycles` 下一行固定为 `cycle占比`；`time(us)` 和
   `CPU利用率` 来自独立time轮次。
 - `IPC` 和 `Retire` 分别输出，不合并为一行。
+- 920B按6-wide文档、950按HIP12的8-wide文档输出Retire、Frontend、
+  BadSpec和Backend分层。Backend的Memory Bound继续拆分为L1/L2/L3/Mem/Store；
+  950另输出Resource Bound，920B该行显示 `未采集`。
 - 阶段比率按 `SUM(分子)/SUM(分母)` 计算，不对每行比率再取平均。
 - 第二个sheet固定为 `热点函数`，使用容器内 `perf report` 解析后的报告。
 - 其余明细sheet保留全部原始记录，包括prefill、decode和未对齐调用；明细中的
   `时间(us)` 也来自独立time轮次，`time_enabled/time_running` 只描述PMU调度。
 - `prepare_attn` 明细包含runner与model state两个区段；`output` 明细包含
   `async_output_init` 与 `postprocess_sampled` 两个区段。
+- 920B和950每个事件组另有一个 `execute_to_sample` 明细sheet；端到端列的
+  `cycle占比` 为 `不适用`，不会加入八阶段cycles总和。
 - 普通sheet冻结首行和首列；热点正文保持左对齐。
-- 920b和950默认生成56个sheet，Hygon七组Core PMU加一组独立L3
-  Uncore采集，默认生成50个sheet。
+- 汇总sheet底部直接附带time轮 `benchmark.log` 中的请求吞吐、token吞吐和
+  TTFT/TPOT/ITL等实际输出项。
+- 920B和950均为13组PMU，默认各生成93个sheet；Hygon七组Core PMU加一组
+  独立L3 Uncore采集，默认生成50个sheet。
 
 每次运行结果位于 `results/<芯片>/<RUN_ID>/`，包含原始日志、解析CSV、
 `summary.csv`、`collection_quality.csv`、热点文件、最终Excel和

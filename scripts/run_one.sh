@@ -6,6 +6,8 @@ LABEL=${1:?usage: run_one.sh LABEL [EVENT_CODES] [EVENT_NAMES] [PMU_SCOPE]}
 CODES=${2-}
 NAMES=${3:-$CODES}
 PMU_SCOPE=${4:-thread}
+KPERF_TARGET=${KPERF_TARGET:-}
+KPERF_QUALIFIER=${KPERF_QUALIFIER:-}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 set -a
 source "$SCRIPT_DIR/config.env"
@@ -63,7 +65,12 @@ COLLECT_MODE=disabled
 KPERF_ENV=(KPERF_ENABLE=0)
 if [[ "$LABEL" == time ]]; then
     COLLECT_MODE=time
-    KPERF_ENV=(KPERF_ENABLE=1 KPERF_MODE=time)
+    KPERF_ENV=(
+        KPERF_ENABLE=1
+        KPERF_MODE=time
+        KPERF_TARGET="$KPERF_TARGET"
+        KPERF_QUALIFIER="$KPERF_QUALIFIER"
+    )
 elif [[ -n "$CODES" ]]; then
     [[ "$PMU_SCOPE" == thread || "$PMU_SCOPE" == uncore ]] || {
         printf 'Unsupported PMU scope: %s\n' "$PMU_SCOPE" >&2
@@ -76,6 +83,8 @@ elif [[ -n "$CODES" ]]; then
         KPERF_SCOPE="$PMU_SCOPE"
         KPERF_RAW_EVENTS="$CODES"
         KPERF_EVENT_NAMES="$NAMES"
+        KPERF_TARGET="$KPERF_TARGET"
+        KPERF_QUALIFIER="$KPERF_QUALIFIER"
     )
     if [[ "$PMU_SCOPE" == uncore ]]; then
         : "${KPERF_PMU_NAME:?set KPERF_PMU_NAME for uncore collection}"
@@ -91,6 +100,8 @@ fi
     printf 'pmu_name=%s\n' "${KPERF_PMU_NAME:-}"
     printf 'events=%s\n' "$CODES"
     printf 'names=%s\n' "$NAMES"
+    printf 'target=%s\n' "$KPERF_TARGET"
+    printf 'qualifier=%s\n' "$KPERF_QUALIFIER"
     printf 'model=%s\n' "$MODEL"
     printf 'source=%s\n' "$SOURCE_ROOT"
     printf 'execution_mode=%s\n' "$EXECUTION_MODE"
@@ -146,7 +157,7 @@ sleep "$SERVICE_SETTLE_SECONDS"
 START_LINE=$(( $(wc -l < "$RUN_DIR/server.log") + 1 ))
 
 if [[ "$LABEL" == hotspot ]]; then
-    WORKER_PID=$(pgrep -f "$HOTSPOT_WORKER_PATTERN" 2>/dev/null | head -1 || true)
+    WORKER_PID=$(pgrep -x "$HOTSPOT_WORKER_PATTERN" 2>/dev/null | head -1 || true)
     [[ -n "$WORKER_PID" ]] || {
         printf 'No process matched: %s\n' "$HOTSPOT_WORKER_PATTERN" >&2
         exit 8

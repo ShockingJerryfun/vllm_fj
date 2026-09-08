@@ -1,6 +1,6 @@
 <!-- markdownlint-disable MD001 MD041 -->
 
-# 本分支：vLLM 0.26.0 默认V2 Decode八阶段PMU打点
+# 本分支：vLLM 0.26.0 默认V2 Decode八阶段与端到端PMU打点
 
 当前基线为Qwen3-8B、Python 3.13、PyTorch 2.11.0。分支按真实decode串行路径
 采集下面八个CPU PMU区间：
@@ -15,6 +15,11 @@
 | `sample` | `GPUModelRunner.sample()` |
 | `async_output_init` | `AsyncOutput.__init__()` |
 | `postprocess_sampled` | `GPUModelRunner.postprocess_sampled()` |
+
+920B和950还采集 `execute_model_to_sample_tokens`：从Worker的 `execute_model()`
+进入到 `sample_tokens()` 返回。这个区间与八阶段重叠，并包含八阶段之间未单独
+打点的同一EngineCore/Worker执行线程逻辑，包括两次Worker调用之间
+的调度代码；不包含异步输出线程后续等待D2H完成的时间。
 
 ## 打点工具原理
 
@@ -31,6 +36,8 @@
 中调用 `kperf_finish(stage)`，因此正常返回和异常退出都会尝试关闭区间。探针用
 模块级 `ACTIVE` 状态保存当前区间，不是线程局部栈；本方案依赖八段在同一执行
 链中串行且不嵌套，不支持把它当作可嵌套或多线程并发的通用Profiler。
+端到端区间通过显式 `KPERF_TARGET` 在独立服务轮次中采集；该轮的八阶段
+`begin/finish` 不会重置或提前关闭端到端计数器。
 
 ### Core PMU计数
 
@@ -85,10 +92,15 @@ time和PMU是两类独立采集轮次。芯片脚本先运行一次time，再为
 `SUM(分子)/SUM(分母)`，不是先计算逐行比率再平均；绝对时间和绝对计数使用有效
 Decode行的算术平均。
 
+920B和950端到端同样分别运行time和13个PMU事件组。解析器用区间内实际出现的
+`run_fullgraph` 作为Decode资格标记：默认应有1个Prefill原始区间和99个
+FullGraph Decode区间，只有后者进入汇总。端到端与八阶段不是可相加的第九阶段，
+因此其 `cycle占比` 固定显示 `不适用`。
+
 ### hotspot与PMU打点的区别
 
-`hotspot` 是另一轮独立运行，此时 `KPERF_ENABLE=0`。脚本只在服务就绪后枚举
-第一个 `VLLM::Worker`，并执行
+`hotspot` 是另一轮独立运行，此时 `KPERF_ENABLE=0`。脚本只在服务就绪后精确
+匹配第一个 `VLLM::Worker_TP`，并执行
 `PYTHONPERFSUPPORT=1 perf record -e cycles:u -c 100000 -p <Worker PID>`，
 生成 `perf.data` 和 `perf report`。它是按用户态cycles事件周期进行的
 平坦符号热点采样；不是八段区间的精确事件计数，也不参与Topdown公式。

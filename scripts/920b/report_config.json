@@ -3,24 +3,81 @@
     {
       "name": "topdown",
       "suffix": "TOPDOWN",
-      "events": ["0x0011", "0x0008", "0x003e", "0x001b"],
-      "event_headers": ["0x0011 (cycles)", "0x0008", "0x003e", "0x001b"],
+      "events": ["0x0011", "0x0008", "0x2011", "0x2012", "0x001b"],
+      "event_headers": ["0x0011 (cycles)", "0x0008", "0x2011", "0x2012", "0x001b"],
       "derived": [
         {"name": "retire", "number_format": "0.00%", "formula": "=IFERROR({0x0008}/(6*{0x0011}),\"\")"},
-        {"name": "frontend_bound", "number_format": "0.00%", "formula": "=IFERROR({0x003e}/(6*{0x0011}),\"\")"},
+        {"name": "frontend_bound", "number_format": "0.00%", "formula": "=IFERROR({0x2011}/(6*{0x0011}),\"\")"},
+        {"name": "fetch_latency_bound", "number_format": "0.00%", "formula": "=IFERROR({0x2012}/{0x0011},\"\")"},
+        {"name": "fetch_bandwidth_bound", "number_format": "0.00%", "formula": "=IFERROR({frontend_bound}-{fetch_latency_bound},\"\")"},
         {"name": "bad_spec", "number_format": "0.00%", "formula": "=IFERROR(({0x001b}-{0x0008})/(6*{0x0011}),\"\")"},
         {"name": "backend_bound", "number_format": "0.00%", "formula": "=IFERROR(1-{retire}-{frontend_bound}-{bad_spec},\"\")"}
       ]
     },
     {
+      "name": "flush",
+      "suffix": "FLUSH",
+      "events": ["0x0011", "0x0010", "0x2010", "0x104f", "0x200f"],
+      "event_headers": ["0x0011 (cycles)", "0x0010 (br_mispredict)", "0x2010 (rob_flush)", "0x104f (if_sp_flush)", "0x200f (nuke_flush)"],
+      "derived": [
+        {"name": "branch_flush", "number_format": "0.00%", "formula": "=IFERROR({0x0010}*5/{0x0011},\"\")"},
+        {"name": "ooo_flush", "number_format": "0.00%", "formula": "=IFERROR({0x2010}*9/{0x0011},\"\")"},
+        {"name": "sp_flush", "number_format": "0.00%", "formula": "=IFERROR({0x104f}*5/{0x0011},\"\")"},
+        {"name": "flush", "number_format": "0.00%", "formula": "=IFERROR({branch_flush}+{ooo_flush}+{sp_flush},\"\")"},
+        {"name": "branch_mispredict_weight", "number_format": "0.00%", "formula": "=IFERROR({0x0010}/({0x0010}+{0x2010}),\"\")"},
+        {"name": "machine_clear_weight", "number_format": "0.00%", "formula": "=IFERROR(1-{branch_mispredict_weight},\"\")"},
+        {"name": "nuke_flush", "number_format": "0.00%", "formula": "=IFERROR({0x200f}/{0x2010},\"\")"},
+        {"name": "other_flush", "number_format": "0.00%", "formula": "=IFERROR(1-{nuke_flush},\"\")"}
+      ]
+    },
+    {
+      "name": "badspec_branch",
+      "suffix": "BADSPEC_BR",
+      "events": ["0x0010", "0x1010", "0x1013", "0x1016", "0x100d"],
+      "event_headers": ["0x0010 (br_mispredict)", "0x1010 (indirect)", "0x1013 (blr)", "0x1016 (bl)", "0x100d (ret)"],
+      "derived": [
+        {"name": "indirect_branch", "number_format": "0.00%", "formula": "=IFERROR({0x1010}/{0x0010},\"\")"},
+        {"name": "push_branch", "number_format": "0.00%", "formula": "=IFERROR(({0x1013}+{0x1016})/{0x0010},\"\")"},
+        {"name": "pop_branch", "number_format": "0.00%", "formula": "=IFERROR({0x100d}/{0x0010},\"\")"},
+        {"name": "other_branch", "number_format": "0.00%", "formula": "=IFERROR(({0x0010}-{0x1013}-{0x1016}-{0x100d})/{0x0010},\"\")"}
+      ]
+    },
+    {
+      "name": "backend_core",
+      "suffix": "BACKEND_CORE",
+      "events": ["0x0011", "0x7001", "0x7002", "0x7003", "0x7004"],
+      "event_headers": ["0x0011 (cycles)", "0x7001 (exe_stall_cycle)", "0x7002 (fdiv_fsqrt_stall)", "0x7003 (exe_stall_div)", "0x7004 (fsu_stall)"],
+      "derived": [
+        {"name": "exe_stall", "number_format": "0.00%", "formula": "=IFERROR({0x7001}/{0x0011},\"\")"},
+        {"name": "fdiv_stall", "number_format": "0.00%", "formula": "=IFERROR({0x7002}/{0x0011},\"\")"},
+        {"name": "div_stall", "number_format": "0.00%", "formula": "=IFERROR({0x7003}/{0x0011},\"\")"},
+        {"name": "fsu_stall", "number_format": "0.00%", "formula": "=IFERROR({0x7004}/{0x0011},\"\")"}
+      ]
+    },
+    {
+      "name": "backend_memory",
+      "suffix": "BACKEND_MEM",
+      "events": ["0x0011", "0x7005", "0x7006", "0x7007", "0x7008", "0x7009"],
+      "event_headers": ["0x0011 (cycles)", "0x7005 (memstall_anyload)", "0x7006 (memstall_store)", "0x7007 (memstall_l1miss)", "0x7008 (memstall_l2miss)", "0x7009 (memstall_l3miss)"],
+      "derived": [
+        {"name": "memory_bound", "number_format": "0.00%", "formula": "=IFERROR(({0x7005}+{0x7006})/{0x0011},\"\")"},
+        {"name": "l1_bound", "number_format": "0.00%", "formula": "=IFERROR(({0x7005}-{0x7007})/{0x0011},\"\")"},
+        {"name": "l2_bound", "number_format": "0.00%", "formula": "=IFERROR(({0x7007}-{0x7008})/{0x0011},\"\")"},
+        {"name": "l3_bound", "number_format": "0.00%", "formula": "=IFERROR(({0x7008}-{0x7009})/{0x0011},\"\")"},
+        {"name": "mem_bound", "number_format": "0.00%", "formula": "=IFERROR({0x7009}/{0x0011},\"\")"},
+        {"name": "store_bound", "number_format": "0.00%", "formula": "=IFERROR({0x7006}/{0x0011},\"\")"}
+      ]
+    },
+    {
       "name": "icache",
       "suffix": "ICACHE",
-      "events": ["0x0008", "0x0001", "0x0014", "0x0027", "0x0028"],
+      "events": ["0x0008", "0x0001", "0x0014", "0x0027", "0x0028", "0x0011"],
       "derived": [
         {"name": "l1i_miss", "number_format": "0.00%", "formula": "=IFERROR({0x0001}/{0x0014},\"\")"},
         {"name": "l1i_mpki", "number_format": "0.00", "formula": "=IFERROR({0x0001}/{0x0008}*1000,\"\")"},
         {"name": "l2i_miss", "number_format": "0.00%", "formula": "=IFERROR({0x0028}/{0x0027},\"\")"},
-        {"name": "l2i_mpki", "number_format": "0.00", "formula": "=IFERROR({0x0028}/{0x0008}*1000,\"\")"}
+        {"name": "l2i_mpki", "number_format": "0.00", "formula": "=IFERROR({0x0028}/{0x0008}*1000,\"\")"},
+        {"name": "idle_by_icache_miss", "number_format": "0.00%", "formula": "=IFERROR((({0x0027}-{0x0028})*15+{0x0028}*100)/{0x0011},\"\")"}
       ]
     },
     {
@@ -57,10 +114,11 @@
     {
       "name": "tlb2",
       "suffix": "TLB2",
-      "events": ["0x0008", "0x002d", "0x002e", "0x002f", "0x0030"],
+      "events": ["0x0008", "0x002d", "0x002e", "0x002f", "0x0030", "0x0011"],
       "derived": [
         {"name": "stlb_miss", "number_format": "0.00%", "formula": "=IFERROR(({0x002d}+{0x002e})/({0x002f}+{0x0030}),\"\")"},
-        {"name": "stlb_mpki", "number_format": "0.00", "formula": "=IFERROR(({0x002d}+{0x002e})/{0x0008}*1000,\"\")"}
+        {"name": "stlb_mpki", "number_format": "0.00", "formula": "=IFERROR(({0x002d}+{0x002e})/{0x0008}*1000,\"\")"},
+        {"name": "idle_by_itlb_miss", "number_format": "0.00%", "formula": "=IFERROR((({0x0030}-{0x002e})*15+{0x002e}*100)/{0x0011},\"\")"}
       ]
     },
     {

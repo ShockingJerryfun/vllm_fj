@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from kperf_instrument import kperf_span_begin, kperf_span_finish
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
 from vllm.device_allocator import get_mem_allocator_instance
@@ -88,6 +89,7 @@ from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
+KPERF_END_TO_END_STAGE = "execute_model_to_sample_tokens"
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
@@ -1080,11 +1082,30 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        try:
+            return self.model_runner.sample_tokens(grammar_output)
+        finally:
+            kperf_span_finish(KPERF_END_TO_END_STAGE)
 
     @torch.inference_mode()
     @with_gpu_sync_check
     def execute_model(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        collect_end_to_end = scheduler_output.total_num_scheduled_tokens > 0
+        if collect_end_to_end:
+            kperf_span_begin(KPERF_END_TO_END_STAGE)
+        try:
+            output = self._execute_model_inner(scheduler_output)
+        except Exception:
+            if collect_end_to_end:
+                kperf_span_finish(KPERF_END_TO_END_STAGE)
+            raise
+        if collect_end_to_end and output is not None:
+            kperf_span_finish(KPERF_END_TO_END_STAGE)
+        return output
+
+    def _execute_model_inner(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # ensure any previous non-blocking PP sends are complete
