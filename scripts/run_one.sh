@@ -157,7 +157,7 @@ sleep "$SERVICE_SETTLE_SECONDS"
 START_LINE=$(( $(wc -l < "$RUN_DIR/server.log") + 1 ))
 
 if [[ "$LABEL" == hotspot ]]; then
-    WORKER_PID=$(pgrep -x "$HOTSPOT_WORKER_PATTERN" 2>/dev/null | head -1 || true)
+    WORKER_PID=$(pgrep -w -x "$HOTSPOT_WORKER_PATTERN" 2>/dev/null | head -1 || true)
     [[ -n "$WORKER_PID" ]] || {
         printf 'No process matched: %s\n' "$HOTSPOT_WORKER_PATTERN" >&2
         exit 8

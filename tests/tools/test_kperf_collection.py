@@ -268,7 +268,7 @@ def test_arm_event_groups_match_report_configs() -> None:
 
     assert 'HOTSPOT_WORKER_PATTERN="VLLM::Worker_TP"' in env_text
     run_one = (root / "scripts" / "run_one.sh").read_text(encoding="utf-8")
-    assert 'pgrep -x "$HOTSPOT_WORKER_PATTERN"' in run_one
+    assert 'pgrep -w -x "$HOTSPOT_WORKER_PATTERN"' in run_one
 
 
 def test_arm_end_to_end_cycles_do_not_change_pipeline_shares() -> None:
